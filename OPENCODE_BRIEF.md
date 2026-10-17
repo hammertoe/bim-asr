@@ -11,7 +11,7 @@
 /Users/matt/Development/bim-asr
 
 Bim-ASR is a Speech-Augmented Language Model (SALM) that fuses a
-frozen FastConformer acoustic encoder with a frozen Qwen3-4B-Instruct
+frozen FastConformer acoustic encoder with a frozen Qwen3.5-4B-Instruct
 LLM through a small linear projection plus a LoRA adapter. Only the
 projection and LoRA are trained.
 
@@ -48,7 +48,7 @@ Canary.
 
 - Based on the stock nvidia/canary-qwen-2.5b `salm.yaml`.
 - Encoder: nvidia/parakeet-tdt-0.6b-v2
-- LLM: Qwen/Qwen3-4B-Instruct-2507
+- LLM: Qwen/Qwen3.5-4B
 - Projection shape: (512, 2560)
 - LoRA: rank 32 on q/k/v/o_proj
 - Frozen encoder, trainable projection + LoRA

@@ -25,12 +25,12 @@ from bim_asr.model import (  # noqa: E402
 def test_config_defaults() -> None:
     cfg = BimAsrConfig()
     assert cfg.encoder_id == "nvidia/parakeet-tdt-0.6b-v2"
-    assert cfg.llm_id == "Qwen/Qwen3-4B-Instruct-2507"
+    assert cfg.llm_id == "Qwen/Qwen3.5-4B"
     assert cfg.encoder_hidden == 512
     assert cfg.llm_hidden == 2560
     assert cfg.lora_rank == 32
     assert cfg.lora_alpha == 64
-    assert cfg.lora_target_modules == ("q_proj", "k_proj", "v_proj", "o_proj")
+    assert cfg.lora_target_modules == ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
 
 
 def test_config_immutable() -> None:

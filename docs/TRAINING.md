@@ -32,7 +32,7 @@ If this fails, do not start renting GPUs.
 
 ## Stage 1 — general English baseline (rented GPU)
 
-Goal: a working SALM with Parakeet encoder + Qwen3-4B + projection +
+Goal: a working SALM with Parakeet encoder + Qwen3.5-4B + projection +
 LoRA, trained on a small English corpus. This is the reference run.
 
 - Data: LibriSpeech train-clean-100, 100 hours of read English.

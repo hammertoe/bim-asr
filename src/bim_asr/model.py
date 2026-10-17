@@ -2,13 +2,26 @@
 
 This is the reference implementation that mirrors the SALM recipe used
 by nvidia/canary-qwen-2.5b (the current top of the Open ASR
-Leaderboard). We swap in a Qwen3-4B-Instruct base and use the encoder
-from nvidia/parakeet-tdt-0.6b-v2.
+Leaderboard). We swap in a Qwen3.5-4B-Instruct base and use the
+encoder from nvidia/parakeet-tdt-0.6b-v2.
 
 Training-time pieces that the NeMo SALM trainer expects (FSDP hooks,
 gradient accumulation, mixed precision, audio preprocessing) are
 intentionally kept out of this file. The NeMo trainer wraps this
 class.
+
+Qwen3.5 architecture note
+-------------------------
+
+Qwen3.5-4B is a hybrid model: 8 blocks of (3x Gated DeltaNet -> FFN)
+followed by 1 block of (Gated Attention -> FFN), repeated for a total
+of 32 layers. The hidden size is 2560 (same as Qwen3-4B-Instruct), so
+the projection bridge from FastConformer (512-dim) is unchanged.
+
+For LoRA we target the attention projections in the Gated Attention
+layers (q_proj, k_proj, v_proj, o_proj) and the FFN gate/up/down
+projections in all layers. This is the broadest correct target set
+we can use without peft having explicit support for Gated DeltaNet.
 """
 
 from __future__ import annotations
@@ -22,7 +35,8 @@ from torch import nn
 
 # Hidden sizes are pinned by the source checkpoints.
 _FASTCONFORMER_HIDDEN = 512  # Parakeet TDT 0.6B v2 encoder output
-_QWEN3_4B_HIDDEN = 2560      # Qwen3-4B-Instruct-2507 token embedding dim
+_QWEN35_4B_HIDDEN = 2560     # Qwen3.5-4B token embedding dim
+_QWEN35_2B_HIDDEN = 2560     # Qwen3.5-2B (same hidden as the 4B)
 _AUDIO_FRAME_RATE = 12.5     # 80 ms frames, 12.5 frames per second of audio
 
 
@@ -31,26 +45,35 @@ class BimAsrConfig:
     """Static configuration for a Bim-ASR model.
 
     The defaults match nvidia/parakeet-tdt-0.6b-v2 for the audio side
-    and Qwen/Qwen3-4B-Instruct-2507 for the language model side.
+    and Qwen/Qwen3.5-4B for the language model side. Qwen3.5-2B is
+    kept as a second variant for the laptop smoke test (smaller, fits
+    in 16 GB M-series unified memory more comfortably).
     """
 
     encoder_id: str = "nvidia/parakeet-tdt-0.6b-v2"
-    llm_id: str = "Qwen/Qwen3-4B-Instruct-2507"
+    llm_id: str = "Qwen/Qwen3.5-4B"
     audio_locator_tag: str = "<|audio|>"
 
     encoder_hidden: int = _FASTCONFORMER_HIDDEN
-    llm_hidden: int = _QWEN3_4B_HIDDEN
+    llm_hidden: int = _QWEN35_4B_HIDDEN
     audio_frame_rate_hz: float = _AUDIO_FRAME_RATE
 
     # LoRA settings
     lora_rank: int = 32
     lora_alpha: int = 64
     lora_dropout: float = 0.05
+    # Qwen3.5 target modules. Attention projections cover the Gated
+    # Attention layers; the FFN projections cover the Gated DeltaNet
+    # MLP paths. peft's standard module-name matching will hit the
+    # matching parameter names in both block types.
     lora_target_modules: tuple = (
         "q_proj",
         "k_proj",
         "v_proj",
         "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
     )
 
     # Generation
@@ -59,6 +82,19 @@ class BimAsrConfig:
 
     # Prompt the SALM model is trained against
     user_prompt: str = "Transcribe the following audio."
+
+    @classmethod
+    def for_2b_smoke(cls) -> "BimAsrConfig":
+        """The 2B variant for the laptop smoke test.
+
+        Qwen3.5-2B has the same hidden size as the 4B, so the
+        projection bridge is identical. The LLM is smaller and faster,
+        which matters when the OpenCode laptop has limited VRAM.
+        """
+        return dataclasses.replace(
+            cls(),
+            llm_id="Qwen/Qwen3.5-2B",
+        )
 
 
 class AudioProjection(nn.Module):
@@ -77,7 +113,7 @@ class AudioProjection(nn.Module):
     def __init__(
         self,
         encoder_hidden: int = _FASTCONFORMER_HIDDEN,
-        llm_hidden: int = _QWEN3_4B_HIDDEN,
+        llm_hidden: int = _QWEN35_4B_HIDDEN,
     ) -> None:
         super().__init__()
         self.norm = nn.LayerNorm(encoder_hidden)
@@ -99,10 +135,10 @@ class BimAsrModel(nn.Module):
 
     - encoder: Parakeet FastConformer (we use the encoder only; the
       TDT decoder is dropped).
-    - tokenizer: Qwen3 tokenizer, used to encode the prompt and
+    - tokenizer: Qwen3.5 tokenizer, used to encode the prompt and
       decode the generated transcript.
-    - llm: Qwen3-4B-Instruct-2507 with LoRA adapters on the
-      attention projections.
+    - llm: Qwen3.5-4B with LoRA adapters on the attention and FFN
+      projections. Qwen3.5-2B is the smaller variant.
     - projection: a fresh nn.Linear(512, 2560) bridge.
 
     The forward pass follows the SALM pattern:
@@ -145,8 +181,8 @@ class BimAsrModel(nn.Module):
 
         Loading is done through transformers + peft. The Parakeet
         encoder is loaded via the NeMo-to-HF conversion script the
-        first time (see scripts/prepare_parakeet_encoder.py); the Qwen3
-        LLM is loaded via transformers AutoModelForCausalLM.
+        first time (see scripts/prepare_parakeet_encoder.py); the
+        Qwen3.5 LLM is loaded via transformers AutoModelForCausalLM.
         """
         from peft import LoraConfig, get_peft_model
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -160,7 +196,7 @@ class BimAsrModel(nn.Module):
 
         model = cls(config)
 
-        # Load Qwen3 LLM + LoRA
+        # Load Qwen3.5 LLM + LoRA
         llm_kwargs: dict = dict(
             torch_dtype=torch.bfloat16,
             cache_dir=str(cache_dir) if cache_dir else None,
@@ -181,7 +217,7 @@ class BimAsrModel(nn.Module):
             config.llm_id, cache_dir=llm_kwargs.get("cache_dir")
         )
 
-        # Apply LoRA on the attention projections only.
+        # Apply LoRA on the attention and FFN projections.
         lora_config = LoraConfig(
             r=config.lora_rank,
             lora_alpha=config.lora_alpha,
@@ -243,7 +279,7 @@ def build_default_prompt(
     spliced in at the position of audio_locator_tag by the SALM
     trainer / inference loop.
 
-    The format is Qwen3's ChatML.
+    The format is Qwen3.5's ChatML.
     """
     messages = [
         {"role": "system", "content": "You are a careful speech transcriber."},
